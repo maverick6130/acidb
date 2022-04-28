@@ -33,12 +33,14 @@ class Schema {
 
     bool foreignKey(std::vector<int> ref_cols, char* ref_tbl);
 
-    Schema_ getSchema();
+    const Schema_* getSchema();
     
 
     std::vector<int> getpk();
 
     std::string encodeSchema();
+
+    void print();
 };
 
 Schema decodeSchema(char * s, int max_len, int* length = NULL);
