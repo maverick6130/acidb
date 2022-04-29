@@ -9,6 +9,17 @@
 
 #define END_OF_PAGE PF_PAGE_SIZE
 
+// get unique index number from cols of table
+int cols_to_indexNo(std::vector<int> cols, int maxcols)
+{
+    int indexNo = 0;
+    for (int i = cols.size() - 1; i >= 0; i--)
+    {
+        indexNo = indexNo * maxcols + cols[i];
+    }
+    return indexNo;
+}
+
 // get number of slots in the page buffer
 int  getNumSlots(byte *pageBuf)
 {
@@ -31,28 +42,37 @@ int  getLen(int slot, byte *pageBuf)
 }
 
 void Table::deleteRow(int rowId){
-    Table_Delete(table, rowId);
     char record[MAX_PAGE_SIZE];
     int num_bytes = Table_Get(table, rowId, record, MAX_PAGE_SIZE);
     if(num_bytes == -1) {
         return;
     }
 
+    // TODO: change indexeNo to columns[]
     for(int i=0; i<indexes.size(); i++){
         if(indexes[i].isOpen){
             Schema_ sch = *schema.getSchema();   
-            AM_DeleteEntry(indexes[i].fileDesc, indexes[i].attrType, indexes[i].attrLen, indexes[i].numCols, getNthfield(record, indexes[i].indexNo, &sch), rowId);
+            // std::cout<<indexes[i].indexNo<<std::endl;
+            int err = AM_DeleteEntry(indexes[i].fileDesc, indexes[i].attrType, indexes[i].attrLen, indexes[i].numCols, getNthfield(record, indexes[i].indexNo, &sch), rowId);
+            // std::cout<<"delte "<<err<<std::endl;
+            assert(err == AME_OK);
         }
         else {
-            indexes[i].fileDesc = PF_OpenFile((char*)(name + std::to_string(indexes[i].indexNo) + ".idx").c_str());
+            indexes[i].fileDesc = PF_OpenFile((char*)(db_name + "." + name + "." + std::to_string(indexes[i].indexNo) + ".idx").c_str());
+            assert(indexes[i].fileDesc >= 0);
             indexes[i].isOpen = true;
             Schema_ sch = *schema.getSchema();
-            AM_DeleteEntry(indexes[i].fileDesc, indexes[i].attrType, indexes[i].attrLen, indexes[i].numCols, getNthfield(record, indexes[i].indexNo, &sch), rowId);
+            int err = AM_DeleteEntry(indexes[i].fileDesc, indexes[i].attrType, indexes[i].attrLen, indexes[i].numCols, getNthfield(record, indexes[i].indexNo, &sch), rowId);
+            // std::cout<<"delte "<<err<<std::endl;
+            assert(err == AME_OK);
+
         }
     }
+
+    Table_Delete(table, rowId);
 }
 
-Table::Table(Schema* _schema, char* table_name, char* db_name, bool overwrite, std::vector<IndexData> _indexes): schema(*_schema) {
+Table::Table(Schema* _schema, char* table_name, char* db_name, bool overwrite, std::vector<IndexData> _indexes = std::vector<IndexData>(), bool index_pk): schema(*_schema) {
     name += db_name;
     name += ".";
     name += table_name;
@@ -62,6 +82,7 @@ Table::Table(Schema* _schema, char* table_name, char* db_name, bool overwrite, s
         std::cout << "Error opening table " << name << std::endl;
         exit(1);
     }
+    name = table_name;
     std::vector<int> _pk = _schema->getpk();
     pk_index = new int[_pk.size()];
     for(int i=0; i<_pk.size(); i++) {
@@ -69,6 +90,19 @@ Table::Table(Schema* _schema, char* table_name, char* db_name, bool overwrite, s
     }
     pk_size = _pk.size();
     indexes = _indexes;
+
+    if (index_pk)
+    {
+        int pkindexNo = cols_to_indexNo(_pk, _schema->getSchema()->numColumns);
+        bool addDefaultIndex = true;
+        for (int i = 0; i < indexes.size(); ++i)
+            if (indexes[i].indexNo == pkindexNo)
+                addDefaultIndex = false;
+        if (addDefaultIndex)
+        {
+            createIndex(_pk);
+        }
+    }
 }
 
 const Schema& Table::getSchema() {
@@ -91,27 +125,76 @@ bool Table::addRow(void* data[], bool update) {
     for(int i=0; i<indexes.size(); i++){
         if(indexes[i].isOpen){
             Schema_ sch = *schema.getSchema();
-            AM_InsertEntry(indexes[i].fileDesc, indexes[i].attrType, indexes[i].attrLen, indexes[i].numCols, getNthfield(record, indexes[i].indexNo, &sch), rid);
+            int err = AM_InsertEntry(indexes[i].fileDesc, indexes[i].attrType, indexes[i].attrLen, indexes[i].numCols, getNthfield(record, indexes[i].indexNo, &sch), rid);
+            assert(err == AME_OK);
         }
         else {
-            indexes[i].fileDesc = PF_OpenFile((char*)(name + std::to_string(indexes[i].indexNo) + ".idx").c_str());
+            indexes[i].fileDesc = PF_OpenFile((char*)(db_name + "." + name + "." + std::to_string(indexes[i].indexNo) + ".idx").c_str());
+            // std::cout<<(name + std::to_string(indexes[i].indexNo) + ".idx")<<std::endl;
+            assert(indexes[i].fileDesc >= 0);
             indexes[i].isOpen = true;
             Schema_ sch = *schema.getSchema();
-            AM_InsertEntry(indexes[i].fileDesc, indexes[i].attrType, indexes[i].attrLen, indexes[i].numCols, getNthfield(record, indexes[i].indexNo, &sch), rid);
+            int err = AM_InsertEntry(indexes[i].fileDesc, indexes[i].attrType, indexes[i].attrLen, indexes[i].numCols, getNthfield(record, indexes[i].indexNo, &sch), rid);
+            assert(err == AME_OK);
+        }
+    }
+    return true;
+}
+
+bool Table::addRowFromByte(byte *data, int len, bool update) {
+    byte** pk_value = new byte*[pk_size];
+    for(int i=0; i<pk_size; i++) {
+        pk_value[i] = (byte*)data[pk_index[i]];
+    }
+    int rid = Table_Search(table, pk_index, pk_value, pk_size);
+    if(rid != -1 && !update) return false;
+    else if(rid != -1) deleteRow(rid);
+    Schema_ sch = *schema.getSchema();
+
+    Table_Insert(table, data, len, &rid);
+    for(int i=0; i<indexes.size(); i++){
+        if(indexes[i].isOpen){
+            Schema_ sch = *schema.getSchema();
+            int err = AM_InsertEntry(indexes[i].fileDesc, indexes[i].attrType, indexes[i].attrLen, indexes[i].numCols, getNthfield(data, indexes[i].indexNo, &sch), rid);
+            assert(err == AME_OK);
+        }
+        else {
+            indexes[i].fileDesc = PF_OpenFile((char*)(db_name + "." + name + "." + std::to_string(indexes[i].indexNo) + ".idx").c_str());
+            assert(indexes[i].fileDesc >= 0);
+            indexes[i].isOpen = true;
+            Schema_ sch = *schema.getSchema();
+            int err = AM_InsertEntry(indexes[i].fileDesc, indexes[i].attrType, indexes[i].attrLen, indexes[i].numCols, getNthfield(data, indexes[i].indexNo, &sch), rid);
+            assert(err == AME_OK);
         }
     }
     return true;
 }
 
 std::string Table::get_name(){
-    return this->name;
+    return db_name + "." + this->name;
 }
 void print_row(void* callbackObj, int rid, byte* row, int len) {
     Schema_ *schema = (Schema_ *) callbackObj;
-    void** data = new void*[schema->numColumns];
-    decode(schema, (char**)data, row, len);
+    char* data[schema->numColumns];
+    decode(schema, (char**)data, row+2, len);
     for(int i=0; i<schema->numColumns; i++) {
-        std::cout << data[i] << " ";
+        switch(schema->columns[i].type) {
+            case INT:
+                printf("%d\t", DecodeInt(data[i]));
+                break;
+            case FLOAT:
+                printf("%f\t", DecodeFloat(data[i]));
+                break;
+            case LONG:
+                printf("%lld\t", DecodeLong(data[i]));
+                break;
+            case VARCHAR:
+                printf("%s\t", (char*)data[i]);
+                break;
+            default:
+                printf("%s\t", (char*)data[i]);
+                break;
+        }
     }
     std::cout << std::endl;
 }
@@ -135,7 +218,8 @@ void** Table::getRow(void** pk) {
 }
 
 void Table::print() {
-    Schema_ sch = *schema.getSchema();   
+    Schema_ sch = *schema.getSchema(); 
+    schema.print();
     Table_Scan(table, &sch, print_row);
 }
 
@@ -156,10 +240,10 @@ Table* Table::query(bool (*callback)(RecId, byte*, int)){
             {
                 int len = getLen(i, pageBuf);
                 if(len == -1) continue;
-                bool result = callback((pageNo << 16) | i, pageBuf + getNthSlotOffset(i, pageBuf), len);
+                bool result = callback((pageNo << 16) | i, pageBuf + getNthSlotOffset(i, pageBuf)+2, len);
                 if (result){
                     void** data = new void*[sch.numColumns];
-                    decode(&    sch, (char**)data, pageBuf + getNthSlotOffset(i, pageBuf), len);
+                    decode(&    sch, (char**)data, pageBuf + getNthSlotOffset(i, pageBuf)+2, len);
                     t->addRow(data, false);
                 }
             }
@@ -182,16 +266,6 @@ std::vector<char*> Table::getPrimaryKey() {
     return pk;
 }
 
-int cols_to_indexNo(std::vector<int> cols, int maxcols)
-{
-    int indexNo = 0;
-    for (int i = cols.size() - 1; i >= 0; i--)
-    {
-        indexNo = indexNo * maxcols + cols[i];
-    }
-    return indexNo;
-}
-
 int Table::createIndex(std::vector<int> cols) {
     int indexNo = cols_to_indexNo(cols, schema.getSchema()->numColumns);
     for(int i=0; i<indexes.size(); i++) {
@@ -203,6 +277,7 @@ int Table::createIndex(std::vector<int> cols) {
     index.numCols = cols.size();
     index.attrType = new char[cols.size()];
     index.attrLen = new int[cols.size()];
+    index.isOpen = false;
     for (int i = 0; i < cols.size(); i++) {
         switch(schema.getSchema()->columns[cols[i]].type) {
             case VARCHAR:
@@ -226,7 +301,17 @@ int Table::createIndex(std::vector<int> cols) {
                 exit(1);
         }
     }
-    assert(AM_CreateIndex((char*)name.c_str(), index.indexNo, index.attrType, index.attrLen, index.numCols) == AME_OK);
+    int err = AM_CreateIndex((char*)(db_name + "." + name).c_str(), index.indexNo, index.attrType, index.attrLen, index.numCols);
+    if(err == AME_PF) {
+        int fd = PF_OpenFile((char*)(db_name + "." + name + "." + std::to_string(index.indexNo) + ".idx").c_str());
+        if(fd >= 0) {
+            PF_CloseFile(fd);
+        }
+        else {
+            fprintf(stderr, "Table createIndex : cannot create index. Your PF layer sucks\n");
+            exit(1);
+        }
+    }
     indexes.push_back(index);
     return indexNo;
 }
@@ -234,7 +319,14 @@ int Table::createIndex(std::vector<int> cols) {
 bool Table::eraseIndex(int id) {
     for(int i=0; i<indexes.size(); i++) {
         if(indexes[i].indexNo == id) {
-            assert(AM_DestroyIndex((char*)name.c_str(), id) == AME_OK);
+            if(indexes[i].isOpen) {
+                int err = PF_CloseFile(indexes[i].fileDesc);
+                // std::cout<<"table close "<<err<<std::endl;
+                assert(err == PFE_OK);
+                indexes[i].isOpen = false;
+            }
+            int err = AM_DestroyIndex((char*)(db_name + "." + name).c_str(), id);
+            assert(err == AME_OK);
             indexes.erase(indexes.begin() + i);
             return true;
         }
@@ -242,11 +334,16 @@ bool Table::eraseIndex(int id) {
     return false;
 }
 
+
+
 bool Table::close() {
     Table_Close(table);
     for(int i=0; i<indexes.size(); i++) {
         if(indexes[i].isOpen) {
-            assert(PF_CloseFile(indexes[i].fileDesc) == PFE_OK);
+            // assert(PF_UnfixPage(indexes[i].fileDesc, pageNo, 0) == PFE_OK);
+            int err = PF_CloseFile(indexes[i].fileDesc);
+            // std::cout<<"table close "<<err<<std::endl;
+            assert(err == PFE_OK);
             indexes[i].isOpen = false;
         }
     }
@@ -261,10 +358,101 @@ Table::~Table() {
     free (table);
 }
 
+Table* Table::queryIndex(int indexNo, int op, std::vector<void*> values)
+{
+    Table *t = new Table(&schema, (char*)"result", (char*)this->db_name.c_str(), false, std::vector<IndexData>(), false);
+    int pageNo, err;
+    char *pageBuf;
+    Schema_ sch = *schema.getSchema();
+
+    IndexData index;
+    bool index_present = false;
+    for (auto idx : indexes) {
+        if (idx.indexNo == indexNo) {
+            index_present = true;
+            index = idx;
+            break;
+        }
+    }
+
+    if (!index_present) {
+        fprintf(stderr, "Index not found in query index\n");
+        exit(1);
+    }
+
+    if (index.numCols != values.size()) {
+        fprintf(stderr, "Invalid number of values in query index\n");
+        exit(1);
+    }
+
+    byte key[256];
+    byte* keyPtr = key;
+    int remaining_len = 256;
+    for ( int i = 0; i < index.numCols; ++i )
+    {
+        switch ( index.attrType[i] )
+        {
+            case 'c':
+            {
+                int len = EncodeCString((char*)values[i], keyPtr, remaining_len);
+                remaining_len -= len;
+                keyPtr += len;
+                break;
+            }
+            case INT:
+            {
+                // assert(spaceLeft >= 4);
+                EncodeInt(*(int*)values[i], keyPtr);
+                remaining_len -= 4;
+                keyPtr += 4;
+                break;
+            }
+            case LONG:
+            {
+                // assert(spaceLeft >= 8);
+                EncodeLong(*(long*)values[i], keyPtr);
+                remaining_len -= 8;
+                keyPtr += 8;
+                break;
+            }
+            case FLOAT:
+            {
+                // assert(spaceLeft >= 4);
+                EncodeFloat(*(float*)values[i], keyPtr);
+                remaining_len -= 4;
+                keyPtr += 4;
+                break;
+            }
+            default:
+            {
+                printf("Unknown type %c in query index\n", index.attrType[i]);
+                exit(1);
+            }
+        }
+    }
+    int encoded_len = 256 - remaining_len;
+
+    int scanDesc = AM_OpenIndexScan(index.fileDesc, index.attrType, index.attrLen, index.numCols, op, key);
+    while(true){
+        int rid = AM_FindNextEntry(scanDesc);
+        if(rid == AME_EOF) break;
+        char record[MAX_PAGE_SIZE];
+        int num_bytes = Table_Get(table, rid, record, MAX_PAGE_SIZE);
+        t->addRowFromByte(record, encoded_len, 1);
+    }
+    AM_CloseIndexScan(scanDesc);
+
+    return t;
+}
+
 std::string Table::encodeTable() {
     std::string str;
-    char* r = new char[name.size() + 2];
-    int len = EncodeCString((char*)name.c_str(), r, name.size()+2);
+    char* r = new char[db_name.size() + 2];
+    int len = EncodeCString((char*)db_name.c_str(), r, db_name.size()+2);
+    str.append(r,len);
+    free(r);
+    r = new char[name.size() + 2];
+    len = EncodeCString((char*)name.c_str(), r, name.size()+2);
     str.append(r,len);
     free(r);
     str += schema.encodeSchema();
@@ -277,14 +465,20 @@ std::string Table::encodeTable() {
         EncodeInt(indexes[i].indexNo, r);
         str.append(r,4);
         free(r);
-        r = (char*) malloc(sizeof(char));
-        EncodeInt(indexes[i].attrType, r);
+        r = (char*)malloc(sizeof(int));
+        EncodeInt(indexes[i].numCols, r);
         str.append(r,4);
         free(r);
-        r = (char*) malloc(sizeof(int));
-        EncodeInt(indexes[i].attrLength, r);
-        str.append(r,4);
-        free(r);
+        for (int j = 0; j < indexes[i].numCols; ++j) {
+            r = (char*) malloc(sizeof(char));
+            EncodeInt(indexes[i].attrType[j], r);
+            str.append(r,4);
+            free(r);
+            r = (char*) malloc(sizeof(int));
+            EncodeInt(indexes[i].attrLen[j], r);
+            str.append(r,4);
+            free(r);
+        }
     }
     return str;
 }
@@ -293,21 +487,36 @@ std::string Table::encodeTable() {
 Table decodeTable(byte* s, int max_len ) {
     char* r;
     int len = DecodeCString2(s, &r, max_len);
+    std::string db_name(r,len);
+    // std::cout<<len<<std::endl;
+    free(r);
+    s += len+2;
+    len = DecodeCString2(s, &r, max_len);
+    // std::cout<<len<<std::endl;
     std::string name(r,len);
     free(r);
-    s += len;
+    s += len+2;
     Schema schema = decodeSchema(s, max_len, &len);
+    // std::cout<<name<<' '<<db_name<<std::endl;
+    schema.print();
     s+=len;
     int num_indexes = DecodeInt(s);
+    // std::cout<<num_indexes<<std::endl;
     s += sizeof(int);
     std::vector<IndexData> indexes(num_indexes);
     for(int i=0; i<num_indexes; i++) {
         indexes[i].indexNo = DecodeInt(s);
         s += sizeof(int);
-        indexes[i].attrType = DecodeInt(s);
+        indexes[i].numCols = DecodeInt(s);
         s += sizeof(int);
-        indexes[i].attrLength= DecodeInt(s);
-        s += sizeof(int);
+        indexes[i].attrType = (char*) malloc(sizeof(char) * indexes[i].numCols);
+        indexes[i].attrLen = (int*) malloc(sizeof(int) * indexes[i].numCols);
+        for (int j = 0; j < indexes[i].numCols; ++j) {
+            indexes[i].attrType[j] = DecodeInt(s);
+            s += sizeof(int);
+            indexes[i].attrLen[j] = DecodeInt(s);
+            s += sizeof(int);
+        }
     }
-    return Table(&schema,(char*)name.substr(name.find('.'),name.size()).c_str() , (char*)name.substr(0, name.find('.')).c_str(), false, indexes);
+    return Table(&schema, (char*)name.c_str(), (char*)db_name.c_str(), false, indexes);
 }

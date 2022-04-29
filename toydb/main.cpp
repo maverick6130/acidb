@@ -120,6 +120,7 @@ loadCSV() {
     Schema_ *sch = parseSchema(line);
     Schema s(sch, vector<int>(1,0));
     Table tbl(&s,DB_NAME,"",true,vector<IndexData>());
+    tbl.createIndex(std::vector(1,2));
     // checkerr(Table_Open(DB_NAME, sch, true, &tbl), "Loadcsv : table open");
     // AM_DestroyIndex(DB_NAME, 0);
     // assert(AM_CreateIndex(DB_NAME, 0, 'i', 4) == AME_OK);
@@ -128,32 +129,20 @@ loadCSV() {
     char *tokens[MAX_TOKENS];
     char record[MAX_PAGE_SIZE];
 
+    cout<<"Adding rows"<<endl;
     while ((line = fgets(buf, MAX_LINE_LEN, fp)) != NULL) {
-	cout<<line<<endl;
 	int n = split(line, ",", tokens);
 	assert (n == sch->numColumns);
-	cout<<"line"<<endl;
     tbl.addRow((void**)tokens,false);
-    
-    // int len = encode(sch, tokens, record, sizeof(record));
-	// RecId rid;
-
-    // Table_Insert(tbl, record, len, &rid);
-	// printf("%d %s\n", rid, tokens[0]);
-
-	// Indexing on the population column 
-	// int population = atoi(tokens[2]);
-
-	// Use the population field as the field to index on
-    // byte population_bytes[4];
-    // EncodeInt(population, population_bytes);
-	// AM_InsertEntry(index_fileDesc, 'i', 4, population_bytes, rid);
     }
+    cout<<"----------------------------------------------------------------"<<endl;
+    cout<<"Printing"<<endl;
     tbl.print();
     cout<<"----------------------------------------------------------------"<<endl;
+    cout<<"Get Rows"<<endl;
     char* tokens2[1];
     tokens2[0] = new char[100];
-    tokens2[0] = "Angola"; 
+    tokens2[0] = "Zimbabwe"; 
     char** data= (char**)tbl.getRow((void**)tokens2);
     for(int i=0; i<sch->numColumns; i++) {
         switch(sch->columns[i].type) {
@@ -174,6 +163,28 @@ loadCSV() {
                 break;
         }
     }
+    cout<<"\n----------------------------------------------------------------"<<endl;
+    cout<<"Delete Row"<<endl;
+    cout<<tbl.deleteRow((void**)tokens2)<<' ';
+    cout<<"deleted"<<endl;
+    tbl.print();
+    
+    char name[] = "Zimbabwase";
+    char capital[] = "Harare";
+    char pop[] = "16529904";
+    void *data2[3] = {(void*)name, (void*)capital, (void*)pop};
+    tbl.addRow((void**)data2,false);
+
+    tbl.print();
+
+    cout<<"----------------------------------------------------------------"<<endl;
+    cout<<"Encode Decode"<<endl;
+    string str = tbl.encodeTable();
+    Table tbl2 = decodeTable((char*)str.c_str(), str.size());
+    tbl2.print();
+    tbl2.close();
+    cout<<"----------------------------------------------------------------"<<endl;    
+    tbl.eraseIndex(2);
     tbl.close();
     // fclose(fp);
     // Table_Close(tbl);
